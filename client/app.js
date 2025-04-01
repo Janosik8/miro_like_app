@@ -3,7 +3,9 @@ const toolbar = document.getElementById('toolbar');
 const ctx = canvas.getContext('2d');
 
 let isDrawing = false;
-const socket = new WebSocket("ws://localhost:8000/ws");
+let currentDrawingPacket = [];
+
+const socket = new WebSocket("ws://192.168.55.39:8000/ws");
 
 const canvasOffsetX = canvas.offsetLeft;
 const canvasOffsetY = canvas.offsetTop;
@@ -12,27 +14,26 @@ canvas.width = window.innerWidth - canvasOffsetX;
 canvas.height = window.innerHeight - canvasOffsetY;
 
 let lineWidth = 5;
-let drawingData = [];  // Store drawing data for rerendering
-const clientColor = getRandomColor();  // Unique color for each client
+let drawingData = [];
+let drawingDataOtherUsers = [];
+const clientColor = getRandomColor();
 
 // Toolbar Controls
 toolbar.addEventListener('click', e => {
     if (e.target.id === 'clear') {
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        drawingData = [];  // Clear stored data as well
-
-        // Notify server that drawing data has been cleared
+        drawingData = [];
         socket.send(JSON.stringify({ type: 'clear' }));
     }
 });
 
 toolbar.addEventListener('change', e => {
-    if(e.target.id === 'lineWidth') {
+    if (e.target.id === 'lineWidth') {
         lineWidth = parseInt(e.target.value, 10);
     }
 });
 
-// Drawing Function
+// Drawing
 function draw(e) {
     if (!isDrawing) return;
 
@@ -40,23 +41,24 @@ function draw(e) {
     const y = e.clientY - canvasOffsetY;
 
     ctx.lineWidth = lineWidth;
-    ctx.strokeStyle = clientColor;  // Use the client's unique color
+    ctx.strokeStyle = clientColor;
     ctx.lineCap = 'round';
 
     ctx.lineTo(x, y);
     ctx.stroke();
 
-    // Store drawing data for rerendering
-    const data = { type: 'draw', x, y, strokeStyle: clientColor, lineWidth };
-    drawingData.push(data);
-
-    // Send drawing data to the server
-    socket.send(JSON.stringify(data));  
+    currentDrawingPacket.push({
+        type: 'draw',
+        x,
+        y,
+        strokeStyle: clientColor,
+        lineWidth
+    });
 }
 
 // Rerender Canvas
 function rerenderCanvas() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear the canvas first
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.beginPath();
 
     drawingData.forEach(data => {
@@ -67,9 +69,10 @@ function rerenderCanvas() {
             ctx.lineWidth = data.lineWidth;
             ctx.strokeStyle = data.strokeStyle;
             ctx.lineCap = 'round';
-
             ctx.lineTo(data.x, data.y);
             ctx.stroke();
+        } else if (data.type === 'end') {
+            ctx.beginPath();
         }
     });
 }
@@ -77,54 +80,64 @@ function rerenderCanvas() {
 // Mouse Events
 canvas.addEventListener('mousedown', (e) => {
     isDrawing = true;
-    const startX = e.clientX - canvasOffsetX;
-    const startY = e.clientY - canvasOffsetY;
+    currentDrawingPacket = [];
+
+    const x = e.clientX - canvasOffsetX;
+    const y = e.clientY - canvasOffsetY;
 
     ctx.beginPath();
-    ctx.moveTo(startX, startY);
+    ctx.moveTo(x, y);
 
-    const startData = { type: 'start', x: startX, y: startY, strokeStyle: clientColor };
-    drawingData.push(startData);
-
-    socket.send(JSON.stringify(startData));  // Notify others of new line start
+    currentDrawingPacket.push({
+        type: 'start',
+        x,
+        y,
+        strokeStyle: clientColor,
+        lineWidth
+    });
 });
 
 canvas.addEventListener('mouseup', () => {
+    if (!isDrawing) return;
+
     isDrawing = false;
     ctx.beginPath();
 
-    const endData = { type: 'end' };
-    socket.send(JSON.stringify(endData));  // Notify others to stop the path
+    currentDrawingPacket.push({ type: 'end' });
+    drawingData.push(...currentDrawingPacket);
+    socket.send(JSON.stringify(currentDrawingPacket)); // send the full packet
+    currentDrawingPacket = [];
+    drawingData.push(...drawingDataOtherUsers);
+    drawingDataOtherUsers = [];
+    rerenderCanvas();
 });
 
 // Mouse Move
 canvas.addEventListener('mousemove', draw);
 
-// Receive drawing data from other clients
+// Receive drawing data
 socket.onmessage = (event) => {
-    const data = JSON.parse(event.data);
+    const dataPacket = JSON.parse(event.data);
 
-    if (data.type === 'clear') {
-        drawingData = [];  // Clear stored data for all clients
-        ctx.clearRect(0, 0, canvas.width, canvas.height); // Clear canvas
-    } else if (data.type === 'start') {
-        ctx.beginPath();
-        ctx.moveTo(data.x, data.y);
-        drawingData.push(data);
-    } else if (data.type === 'draw') {
-        drawingData.push(data);
-        rerenderCanvas();
-    } else if (data.type === 'end') {
-        ctx.beginPath();  // End the path correctly
+    if (Array.isArray(dataPacket)) {
+
+        drawingDataOtherUsers.push(...dataPacket);
+        
+        if(!isDrawing){
+            drawingData.push(...drawingDataOtherUsers);
+            drawingDataOtherUsers = [];
+            rerenderCanvas();
+        }
+    } else if (dataPacket.type === 'clear') {
+        drawingData = [];
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
     }
 };
 
-// Utility: Generate Random Color
+// Utility
 function getRandomColor() {
     const letters = '0123456789ABCDEF';
-    let color = '#';
-    for (let i = 0; i < 6; i++) {
-        color += letters[Math.floor(Math.random() * 16)];
-    }
-    return color;
+    return '#' + Array.from({ length: 6 }, () =>
+        letters[Math.floor(Math.random() * 16)]
+    ).join('');
 }
